@@ -20,16 +20,30 @@ module Eiox = struct
 end
 
 module Cohttpx = struct
-  let respond_file fname body =
-    let fname = snd fname in
-    let mime_type = Magic_mime.lookup fname in
+  let blit file ~src_off buffer ~dst_off ~len =
+    let cstruct = Cstruct.of_bigarray ~off:dst_off ~len buffer in
+    Eio.File.pread_exact
+      file ~file_offset:(Optint.Int63.of_int src_off) [cstruct]
+
+  let respond_file fname =
+    let length =
+      Eio.Path.with_open_in fname @@ fun file ->
+      Eio.File.size file
+      |> Optint.Int63.to_int
+    in
+    let mime_type =
+      let fname = snd fname in
+      Magic_mime.lookup fname
+    in
     let headers = Http.Header.of_list
       [ "content-type", mime_type;
-        "content-length", string_of_int @@ String.length body;
+        "content-length", string_of_int length;
       ] in
     let response =
       Http.Response.make ~version:`HTTP_1_1 ~status:`OK ~headers () in
-    response, Body.Fixed body
+    response, Body.Custom (fun writer ->
+      Eio.Path.with_open_in fname @@ fun file ->
+      Eio.Buf_write.write_gen writer ~blit ~off:0 ~len:length file)
 
   let tls_connection_handler ~server_config handler flow client_addr =
     let flow = Tls_eio.server_of_flow server_config flow in
@@ -75,9 +89,7 @@ let https_serve ~docroot ~uri path =
          Server.html_response "not found"
     end
     |`Regular_file ->
-       (* TODO stream body instead of loading *)
-       let body = Eio.Path.load fname in
-       Cohttpx.respond_file fname body
+        Cohttpx.respond_file fname
     | _ ->
        Server.html_response "not found")
 
